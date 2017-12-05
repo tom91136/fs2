@@ -7,8 +7,9 @@ import scala.concurrent.duration._
 import cats.{Applicative, Eq, Functor, Monoid, Semigroup, ~>}
 import cats.effect.{Effect, IO, Sync}
 import cats.implicits.{catsSyntaxEither => _, _}
+import fs2.async.Promise
 import fs2.async.mutable.Queue
-import fs2.internal.{Algebra, FreeC, Token}
+import fs2.internal.{Algebra, FreeC, Interrupted, Token}
 
 /**
  * A stream producing output of type `O` and which may evaluate `F`
@@ -1721,14 +1722,78 @@ object Stream {
      * because `s1.interruptWhen(s2)` is never pulled for another element after the first element has been
      * emitted. To fix, consider `s.flatMap(_ => infiniteStream).interruptWhen(s2)`.
      */
-    def interruptWhen(haltWhenTrue: Stream[F,Boolean])(implicit F: Effect[F], ec: ExecutionContext): Stream[F,O] =
-      haltWhenTrue.noneTerminate.either(self.noneTerminate).
-        takeWhile(_.fold(halt => halt.map(!_).getOrElse(false), o => o.isDefined)).
-        collect { case Right(Some(i)) => i }
+    def interruptWhen(haltWhenTrue: Stream[F,Boolean])(implicit F: Effect[F], ec: ExecutionContext): Stream[F,O] = {
+      Stream.eval(async.refOf[F, Boolean](true)) flatMap { interruptibleL =>
+      Stream.eval(async.promise[F, Either[Throwable, Unit]]) flatMap { interruptRight =>
+      Stream.eval(async.promise[F, Either[Throwable, Unit]]) flatMap { interruptLeft =>
+      Stream.eval(async.promise[F, Either[Throwable, Unit]]) flatMap { rightDone =>
+        def interruptL(rsn: Either[Throwable, Unit]) =
+          interruptibleL.modify(_ => false) flatMap { c =>
+            if (c.previous) interruptLeft.setSync(rsn)
+            else F.unit
+          }
+
+        def interruptR = interruptRight.setSync(Right(()))
+
+        val runHalt = haltWhenTrue.dropWhile(! _).take(1).interruptWhen(interruptRight).run.attempt.flatMap { r =>
+          println(s"RIGHT DONE: $r")
+          interruptL(r) *> rightDone.setSync(Right(()))
+        }
+
+        Stream.eval(async.fork(runHalt)) >>
+        self
+        .interruptWhen(interruptLeft)
+        .onFinalize {
+          interruptibleL.setSync(false) *>
+          interruptR *>
+          F.delay { println("LEFT DONE AWAITING RIGHT TO COMPLETE ") } *>
+          rightDone.get.attempt as (())
+        }
+      }}}}
+
+//            haltWhenTrue.noneTerminate.either(self.noneTerminate).
+//              takeWhile(_.fold(halt => halt.map(!_).getOrElse(false), o => o.isDefined)).
+//              collect { case Right(Some(i)) => i }
+    }
+
 
     /** Alias for `interruptWhen(haltWhenTrue.discrete)`. */
     def interruptWhen(haltWhenTrue: async.immutable.Signal[F,Boolean])(implicit F: Effect[F], ec: ExecutionContext): Stream[F,O] =
       interruptWhen(haltWhenTrue.discrete)
+
+    /**
+      * Interrupts this whenever `haltOnSignal` evaluates.
+      *
+      * The interruption of the stream is immediate. If the interruption signal passes on left,
+      * then this will cause the stream to terminate with supplied Throwable as if the stream failed
+      * with that reason. In that case any `handleErrorWith` may bye used to resume stream.
+      *
+      * If the interruption is supplied with Right, then this will interrupts this stream.
+      * That means that stream evaluation is stopped, and all cleanups are invoked.
+      *
+      * If there was asynchronous resource acquisition or evaluation, that did not complete before
+      * stream was interrupted, such evaluation // or acquisition will be still in progress, where in
+      * case of resource, that resource will be released (finalizers will be called) iimmediatelywhen
+      * acquired. When evaluation in progress will be completed, that evaluation result will be discarded.
+      *
+      * @param haltOnSignal A signaling Promise that when completed will cause this stream to be interrupted.
+      */
+    def interruptWhen(haltOnSignal: Promise[F, Either[Throwable, Unit]])(implicit F: Effect[F], ec: ExecutionContext): Stream[F,O] =
+      Stream.fromFreeC(Algebra.interrupt(self.get, haltOnSignal))
+
+    /**
+      * Causes to define boundary, where interruption shall be stopped, i.e. if the streaam interrupted as a result of previous
+      * `interruptWhen` it will normally terminate the execution of the whole stream chain.
+      * However, if the stream interpretation encounters `interruptStop` in the evaluations and
+      * stream was terminated, then such stream will recover on earliest append, onComplete or handleErrorWith.
+      * @return
+      */
+    def interruptStop: Stream[F, O] =
+      Stream.fromFreeC(self.get[F,O] handleErrorWith {
+        case Interrupted => Stream.empty.covary[F].get[F,O]
+        case e => Stream.raiseError(e).covary[F].get[F,O]
+      })
+
 
     /**
      * Nondeterministically merges a stream of streams (`outer`) in to a single stream,
@@ -1947,8 +2012,9 @@ object Stream {
 
     /**
      * Run `s2` after `this`, regardless of errors during `this`, then reraise any errors encountered during `this`.
+     * If the stream terminates because of the interruption, then `s2` is *not* consulted
      *
-     * Note: this should *not* be used for resource cleanup! Use `bracket` or `onFinalize` instead.
+     * Note: this must *not* be used for resource cleanup! Use `bracket` or `onFinalize` instead.
      *
      * @example {{{
      * scala> Stream(1, 2, 3).onComplete(Stream(4, 5)).toList
@@ -1960,6 +2026,7 @@ object Stream {
 
     /**
      * If `this` terminates with `Stream.raiseError(e)`, invoke `h(e)`.
+     * If `this` interrupts, `h` is *not* consulted and stream terminates
      *
      * @example {{{
      * scala> Stream(1, 2, 3).append(Stream.raiseError(new RuntimeException)).handleErrorWith(t => Stream(0)).toList
@@ -1967,7 +2034,10 @@ object Stream {
      * }}}
      */
     def handleErrorWith[O2>:O](h: Throwable => Stream[F,O2]): Stream[F,O2] =
-      Stream.fromFreeC(self.get[F,O2] handleErrorWith { e => h(e).get })
+      Stream.fromFreeC(self.get[F,O2] handleErrorWith {
+        case Interrupted => Stream.raiseError(Interrupted).covary[F].get
+        case e => h(e).get
+      })
 
     /**
      * Run the supplied effectful action at the end of this stream, regardless of how the stream terminates.

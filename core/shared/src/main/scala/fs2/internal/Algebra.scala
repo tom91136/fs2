@@ -1,10 +1,14 @@
 package fs2.internal
 
+
 import cats.data.NonEmptyList
 import cats.~>
-import cats.effect.Sync
+import cats.effect.{Effect, Sync}
 import cats.implicits._
 import fs2._
+import fs2.async.Promise
+
+import scala.concurrent.ExecutionContext
 
 private[fs2] sealed trait Algebra[F[_],O,R]
 
@@ -65,6 +69,7 @@ private[fs2] object Algebra {
     FreeC.suspend(f)
 
   def uncons[F[_],X,O](s: FreeC[Algebra[F,O,?],Unit], chunkSize: Int = 1024, maxSteps: Long = 10000): FreeC[Algebra[F,X,?],Option[(Segment[O,Unit], FreeC[Algebra[F,O,?],Unit])]] = {
+ //   println(s"    UNCNS: ${s.viewL.get}")
     s.viewL.get match {
       case done: FreeC.Pure[Algebra[F,O,?], Unit] => pure(None)
       case failed: FreeC.Fail[Algebra[F,O,?], _] => raiseError(failed.error)
@@ -114,10 +119,16 @@ private[fs2] object Algebra {
     , g: (B, O) => B
     , v: FreeC.ViewL[Algebra[F,O,?], Option[(Segment[O,Unit], FreeC[Algebra[F,O,?],Unit])]]
   )(implicit F: Sync[F]): F[B] = {
-
+    def outAcc = {
+      acc match {
+        case vb: scala.collection.immutable.VectorBuilder[_] => vb.result
+        case other => other
+      }
+    }
+    println(s"  :RFL [${scope.id}]: ${v.get} $outAcc")
     v.get match {
       case done: FreeC.Pure[Algebra[F,O,?], Option[(Segment[O,Unit], FreeC[Algebra[F,O,?],Unit])]] => done.r match {
-        case None => F.pure(acc)
+        case None => println(s"DONE: ${scope.id}: $outAcc"); F.pure(acc)
         case Some((hd, tl)) =>
           F.suspend {
             try runFoldLoop[F,O,B](scope, hd.fold(acc)(g).force.run, g, uncons(tl).viewL)
@@ -125,7 +136,9 @@ private[fs2] object Algebra {
           }
       }
 
-      case failed: FreeC.Fail[Algebra[F,O,?], _] => F.raiseError(failed.error)
+      case failed: FreeC.Fail[Algebra[F,O,?], _] =>
+        if (failed.error == Interrupted) F.pure(acc)
+        else F.raiseError(failed.error)
 
       case bound: FreeC.Bind[Algebra[F,O,?], _, Option[(Segment[O,Unit], FreeC[Algebra[F,O,?],Unit])]] =>
         val f = bound.f.asInstanceOf[
@@ -204,5 +217,129 @@ private[fs2] object Algebra {
       }
     }
     fr.translate[Algebra[G,O,?]](algFtoG)
+  }
+
+
+  /**
+    * Interrupts supplied algebra in free that defines stream whenever `interruptWith` evaluates.
+    *
+    * Interruption will cause all cleanups to be evaluated at earliest opportunity.
+    *
+    * The interruption is implemented as injecting either supplied Throwable or `Interrupted` if not defined.
+    * `Interrupted` is special exception that won't cause stream to fail, but instead silently terminate with
+    * most recent value accumulated.
+    *
+    * @param free             Free (stream) that has to be interrupted
+    * @param interruptWith    An Promise that whenever evaluated will cause the `free` to interrupt at earliest opportunity.
+    *                         If this evaluates to right, this will be replaced with `Interrupted` reason, otherwise
+    *                         this yields interruption cause to Left side.
+    */
+  def interrupt[F[_], O, R](free: FreeC[Algebra[F,O,?],R], interruptWith: Promise[F, Either[Throwable, Unit]])(implicit F: Effect[F], ec: ExecutionContext): FreeC[Algebra[F,O,?],R] = {
+    Algebra.getScope[F, O].flatMap { scope =>
+      Algebra.eval(async.promise[F, Throwable]).flatMap { interruptPromise =>
+        Algebra.eval(async.refOf[F, Either[Throwable, Boolean]](Right(false))).flatMap { interruptRef =>
+          // Right(true) //was interrupted and signalled, Right(false) // not yet interrupted
+
+          // runs when interrupt is signalled.
+          // this completes only once per whole interrupt
+          def runInterrupt: F[Unit] = {
+            interruptWith.get flatMap { rsn =>
+              val reason = rsn.left.toOption.getOrElse(Interrupted)
+              println(s"INTERRUPTED: $rsn, $reason, ${scope.id}")
+              interruptRef.modify {
+                case Right(false) => Left(reason)
+                case other => other
+              } flatMap { c =>
+                if (c.now == c.previous) F.unit // no change
+                else {
+                  F.delay {
+                    println(s"INTERRUPTING: ${scope.id} $reason")
+                  } *>
+                    interruptPromise.setSync(reason)
+                }
+              }
+            }
+          }
+
+
+          // This inspects every step of evaluation for interruption posibility
+          // Interrupt is injected in FreeC.Bind and if Bind contains Eval(F), the
+          // eval is modified such as it races with interruption
+          // once interruption is complete this injects failure and resumes to normal operation
+          def go(free: FreeC[Algebra[F, O, ?], R]): FreeC[Algebra[F, O, ?], R] = {
+            println(s"IG (${scope.id}): ${free.viewL.get} ")
+            free.viewL.get match {
+              case done: FreeC.Pure[Algebra[F, O, ?], R] => done
+              case failed: FreeC.Fail[Algebra[F, O, ?], R] => raiseError(failed.error)
+              case bound: FreeC.Bind[Algebra[F, O, ?], _, R] =>
+                val f = bound.f.asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, O, ?], R]]
+                val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], Any]]
+
+                def interruptEval: FreeC.Eval[Algebra[F, O, ?], Any] = fx.fr match {
+                  case eval: Algebra.Eval[F, O, Any] =>
+                    Algebra.eval[F, O, Any] {
+                      interruptPromise.cancellableGet flatMap { case (get, cancel) =>
+                        async.race(eval.value, get).flatMap {
+                          case Left(x) => cancel as x
+                          case Right(err) => F.raiseError(err)
+                        }
+                      }
+                    }.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], Any]]
+
+                 
+
+                  case algebra =>
+                    println(s"XXXY ${scope.id} : $algebra")
+                    fx
+                }
+
+                Algebra.eval(interruptRef.modify {
+                  case Left(iRsn) => Right(true)
+                  case other => other
+                }) flatMap { c => c.previous match {
+                  case Right(false) =>
+                    // interrupt not yet signalled, insert updated eval (if step was eval) and continue inspection
+                    FreeC.Bind[Algebra[F, O, ?], Any, R](
+                      interruptEval
+                      , r => go(f(r))
+                    )
+                  case Right(true) =>
+                    bound // interrupt already signalled, shall continue with normal evaluation, stop injecting algebra inspection
+
+                  case Left(iRsn) =>
+                    FreeC.suspend(f(Left(iRsn))) // signal interruption
+
+
+                }}
+
+
+              case e => sys.error("Interrupt: FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), was: " + e)
+            }
+          }
+
+          Algebra.eval(async.fork(runInterrupt)) flatMap { _ =>
+            // tom kae sure the interruption stays in the given scope, we are creating scope of the stream, and
+            // when that scope outlives, we always set the interruption to be done,
+            // so any future `late` interruption won't take any effect
+
+            go {
+              //openScope[F, O] flatMap { interruptScope =>
+              acquire[F, O, Unit](F.pure(()), _ =>
+                interruptRef.setSync(Right(true)) map { _ =>  println(s"XXXM INTERRUPT FINISHES: ${scope.id}") }
+              ) flatMap { case (r, token) =>
+                free.flatMap { r =>
+                  release(token) map { _ => r }
+                  // closeScope[F, O](interruptScope) map { _ => r }
+                }
+              }
+            }
+            //go(free)
+          }
+        }
+
+
+      }
+    }
+
   }
 }

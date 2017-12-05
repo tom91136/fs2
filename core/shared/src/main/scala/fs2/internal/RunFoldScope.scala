@@ -53,7 +53,7 @@ import cats.effect.Sync
  * @param id           Unique identification of the scope
  * @param parent       If empty indicates root scope. If non-emtpy, indicates parent of this scope.
  */
-private[internal] final class RunFoldScope[F[_]] private (val id: Token, private val parent: Option[RunFoldScope[F]])(implicit F: Sync[F]) extends Scope[F] { self =>
+private[fs2] final class RunFoldScope[F[_]] private (val id: Token, private val parent: Option[RunFoldScope[F]])(implicit F: Sync[F]) extends Scope[F] { self =>
 
   private val state: Ref[F, RunFoldScope.State[F]] = new Ref(new AtomicReference(RunFoldScope.State.initial))
 
