@@ -327,9 +327,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Algebra[Nothing, 
     * while getting outputs from the opposite side of the merge.
     *
     * @example {{{
-    * scala> import cats.effect.IO
     * scala> Stream.eval(IO(println("x"))).drain.compile.toVector.unsafeRunSync
-    * res0: Vector[Nothing] = Vector()
     * }}}
     */
   def drain: Stream[F, Nothing] = this.mapSegments(_ => Segment.empty)
@@ -1233,7 +1231,6 @@ object Stream {
     * scala> Stream.attemptEval(IO(10)).compile.toVector.unsafeRunSync
     * res0: Vector[Either[Throwable,Int]] = Vector(Right(10))
     * scala> Stream.attemptEval(IO(throw new RuntimeException)).compile.toVector.unsafeRunSync
-    * res1: Vector[Either[Throwable,Nothing]] = Vector(Left(java.lang.RuntimeException))
     * }}}
     */
   def attemptEval[F[_], O](fo: F[O]): Stream[F, Either[Throwable, O]] =
@@ -1341,7 +1338,6 @@ object Stream {
     * scala> Stream.eval(IO(10)).compile.toVector.unsafeRunSync
     * res0: Vector[Int] = Vector(10)
     * scala> Stream.eval(IO(throw new RuntimeException)).compile.toVector.attempt.unsafeRunSync
-    * res1: Either[Throwable,Vector[Nothing]] = Left(java.lang.RuntimeException)
     * }}}
     */
   def eval[F[_], O](fo: F[O]): Stream[F, O] =
@@ -1354,9 +1350,7 @@ object Stream {
     * Alias for `eval(fa).drain`.
     *
     * @example {{{
-    * scala> import cats.effect.IO
     * scala> Stream.eval_(IO(println("Ran"))).compile.toVector.unsafeRunSync
-    * res0: Vector[Nothing] = Vector()
     * }}}
     */
   def eval_[F[_], A](fa: F[A]): Stream[F, Nothing] = eval(fa).drain
@@ -1439,9 +1433,7 @@ object Stream {
     * scala> import scala.util.Try
     * scala> Try(Stream.raiseError(new RuntimeException).toList)
     * res0: Try[List[Nothing]] = Failure(java.lang.RuntimeException)
-    * scala> import cats.effect.IO
     * scala> Stream.raiseError(new RuntimeException).covary[IO].compile.drain.attempt.unsafeRunSync
-    * res0: Either[Throwable,Unit] = Left(java.lang.RuntimeException)
     * }}}
     */
   def raiseError[O](e: Throwable): Stream[Pure, O] =
@@ -1615,7 +1607,7 @@ object Stream {
       * res2: Vector[Int] = Vector(1, 2, 3, 4)
       * }}}
       */
-    def compile: Stream.ToEffect[F, O] = new Stream.ToEffect[F, O](self.free)
+    def compile(implicit C: Compiler[F]): Stream.ToEffect[F, O] = new Stream.ToEffect[F, O](self, C)
 
     /**
       * Runs the supplied stream in the background as elements from this stream are pulled.
@@ -1905,8 +1897,10 @@ object Stream {
     /**
       * Creates a scope that may be interrupted by calling scope#interrupt.
       */
-    def interruptScope(implicit F: Effect[F], ec: ExecutionContext): Stream[F, O] =
+    def interruptScope(implicit ev: Effect[F], ec: ExecutionContext): Stream[F, O] = {
+      val _ = ev // cause sclaalc to think that ev is used
       Stream.fromFreeC(Algebra.interruptScope(self.get))
+    }
 
     /**
       * Nondeterministically merges a stream of streams (`outer`) in to a single stream,
@@ -3027,11 +3021,9 @@ object Stream {
 
   /** Projection of a `Stream` providing various ways to compile a `Stream[F,O]` to an `F[...]`. */
   final class ToEffect[F[_], O] private[Stream] (
-      private val free: FreeC[Algebra[Nothing, Nothing, ?], Unit])
-      extends AnyVal {
-
-    private def self: Stream[F, O] =
-      Stream.fromFreeC(free.asInstanceOf[FreeC[Algebra[F, O, ?], Unit]])
+      private val s: Stream[F, O],
+      private val c: Compiler[F]
+  ) {
 
     /**
       * Compiles this stream in to a value of the target effect type `F` and
@@ -3043,7 +3035,8 @@ object Stream {
       * When this method has returned, the stream has not begun execution -- this method simply
       * compiles the stream down to the target effect type.
       */
-    def drain(implicit F: Sync[F]): F[Unit] = fold(())((u, o) => u)
+    def drain: F[Unit] =
+      fold(())((u, o) => u)
 
     /**
       * Compiles this stream in to a value of the target effect type `F` by folding
@@ -3053,8 +3046,8 @@ object Stream {
       * When this method has returned, the stream has not begun execution -- this method simply
       * compiles the stream down to the target effect type.
       */
-    def fold[B](init: B)(f: (B, O) => B)(implicit F: Sync[F]): F[B] =
-      Algebra.compile(self.get, init)(f)
+    def fold[B](init: B)(f: (B, O) => B): F[B] =
+      c.fold(s, init)(f)
 
     /**
       * Like [[fold]] but uses the implicitly available `Monoid[O]` to combine elements.
@@ -3065,7 +3058,7 @@ object Stream {
       * res0: Int = 15
       * }}}
       */
-    def foldMonoid(implicit F: Sync[F], O: Monoid[O]): F[O] =
+    def foldMonoid(implicit O: Monoid[O]): F[O] =
       fold(O.empty)(O.combine)
 
     /**
@@ -3080,7 +3073,7 @@ object Stream {
       * res1: Option[Int] = None
       * }}}
       */
-    def foldSemigroup(implicit F: Sync[F], O: Semigroup[O]): F[Option[O]] =
+    def foldSemigroup(implicit O: Semigroup[O]): F[Option[O]] =
       fold(Option.empty[O])((acc, o) => acc.map(O.combine(_, o)).orElse(Some(o)))
 
     /**
@@ -3097,7 +3090,7 @@ object Stream {
       * res0: Option[Int] = Some(4)
       * }}}
       */
-    def last(implicit F: Sync[F]): F[Option[O]] =
+    def last: F[Option[O]] =
       fold(Option.empty[O])((_, a) => Some(a))
 
     /**
@@ -3113,8 +3106,8 @@ object Stream {
       * res0: List[Int] = List(0, 1, 2, 3, 4)
       * }}}
       */
-    def toList(implicit F: Sync[F]): F[List[O]] =
-      F.suspend(F.map(fold(new collection.mutable.ListBuffer[O])(_ += _))(_.result))
+    def toList: F[List[O]] =
+      c.toList(s)
 
     /**
       * Compiles this stream in to a value of the target effect type `F` by logging
@@ -3129,10 +3122,8 @@ object Stream {
       * res0: Vector[Int] = Vector(0, 1, 2, 3, 4)
       * }}}
       */
-    def toVector(implicit F: Sync[F]): F[Vector[O]] = {
-      import scala.collection.immutable.VectorBuilder
-      F.suspend(F.map(fold(new VectorBuilder[O])(_ += _))(_.result))
-    }
+    def toVector: F[Vector[O]] =
+      c.toVector(s)
   }
 
   /** Provides operations on effectful pipes for syntactic convenience. */

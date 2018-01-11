@@ -65,7 +65,8 @@ import scala.concurrent.ExecutionContext
 private[fs2] final class CompileScope[F[_], O] private (
     val id: Token,
     private val parent: Option[CompileScope[F, O]],
-    val interruptible: Option[InterruptContext[F, O]]
+    val interruptible: Option[InterruptContext[F, O]],
+    val effect: Option[Effect[F]]
 )(implicit F: Sync[F])
     extends Scope[F] { self =>
 
@@ -107,31 +108,43 @@ private[fs2] final class CompileScope[F[_], O] private (
     */
   def open(
       interruptible: Option[
-        (Effect[F],
-         ExecutionContext,
+        (ExecutionContext,
          CompileScope[F, O] => F[(CompileScope[F, O], FreeC[Algebra[F, O, ?], Unit])])])
     : F[CompileScope[F, O]] =
     F.flatMap(state.modify2 { s =>
-      if (!s.open) (s, None)
+      if (!s.open) (s, Right(None))
       else {
         val newScopeId = new Token
-        def iCtx = interruptible.map {
-          case (effect, ec, whenInterrupted) =>
-            InterruptContext[F, O](
-              effect = effect,
-              ec = ec,
-              promise = Promise.unsafeCreate[F, Option[Throwable]](effect, ec),
-              ref = Ref.unsafeCreate[F, Option[Option[Throwable]]](None),
-              whenInterrupted = whenInterrupted,
-              interruptRoot = newScopeId
-            )
+        interruptible match {
+          case None =>
+            val scope =
+              new CompileScope[F, O](newScopeId, Some(self), self.interruptible, self.effect)
+            (s.copy(children = scope +: s.children), Right(Some(scope)))
+
+          case Some((ec, whenInterrupted)) =>
+            self.effect match {
+              case Some(effect) =>
+                val iCtx =
+                  InterruptContext[F, O](
+                    effect = effect,
+                    ec = ec,
+                    promise = Promise.unsafeCreate[F, Option[Throwable]](effect, ec),
+                    ref = Ref.unsafeCreate[F, Option[Option[Throwable]]](None),
+                    whenInterrupted = whenInterrupted,
+                    interruptRoot = newScopeId
+                  )
+                val scope = new CompileScope[F, O](newScopeId, Some(self), Some(iCtx), self.effect)
+                (s.copy(children = scope +: s.children), Right(Some(scope)))
+
+              case None =>
+                (s,
+                 Left(new RuntimeException("Cannot create interruptible scope for Sync-Only `F`")))
+            }
         }
-        val scope = new CompileScope[F, O](newScopeId, Some(self), iCtx.orElse(self.interruptible))
-        (s.copy(children = scope +: s.children), Some(scope))
       }
     }) {
-      case (c, Some(s)) => F.pure(s)
-      case (_, None)    =>
+      case (c, Right(Some(s))) => F.pure(s)
+      case (_, Right(None))    =>
         // This scope is already closed so try to promote the open to an ancestor; this can fail
         // if the root scope has already been closed, in which case, we can safely throw
         self.parent match {
@@ -139,6 +152,9 @@ private[fs2] final class CompileScope[F[_], O] private (
           case None =>
             F.raiseError(throw new IllegalStateException("cannot re-open root scope"))
         }
+      case (_, Left(err)) =>
+        // indicates that failure was thrown during scope creation, we have to signal it
+        F.raiseError(err)
     }
 
   def acquireResource[R](fr: F[R], release: R => F[Unit]): F[Either[Throwable, (R, Token)]] = {
@@ -377,8 +393,8 @@ private[fs2] final class CompileScope[F[_], O] private (
 private[internal] object CompileScope {
 
   /** Creates a new root scope. */
-  def newRoot[F[_]: Sync, O]: CompileScope[F, O] =
-    new CompileScope[F, O](new Token(), None, None)
+  def newRoot[F[_]: Sync, O](effect: Option[Effect[F]]): CompileScope[F, O] =
+    new CompileScope[F, O](new Token(), None, None, effect)
 
   /**
     * State of a scope.
@@ -432,7 +448,6 @@ private[internal] object CompileScope {
   /**
     * A context of interruption status. This is shared from the parent that was created as interruptible to all
     * its children. It assures consistent view of the interruption through the stack
-    * @param effect   Effect, used to create interruption at Eval.
     * @param ec       Execution context used to create promise and ref, and interruption at Eval.
     * @param promise  Promise signalling once the interruption to the scopes. Only completed once.
     *                 If signalled with None, normal interruption is signalled. If signaled with Some(err) failure is signalled.
