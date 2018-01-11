@@ -25,7 +25,7 @@ private[fs2] object Algebra {
   final case class OpenScope[F[_], O](s: FreeC[Algebra[F, O, ?], Unit],
                                       interruptible: Option[ExecutionContext])
       extends Algebra[F, O, Unit]
-  final case class CloseScope[F[_], O](toClose: CompileScope[F, O]) extends Algebra[F, O, Unit]
+  final case class CloseScope[F[_], O](scopeId: Token) extends Algebra[F, O, Unit]
   final case class GetScope[F[_], O]() extends Algebra[F, O, CompileScope[F, O]]
 
   def output[F[_], O](values: Segment[O, Unit]): FreeC[Algebra[F, O, ?], Unit] =
@@ -62,8 +62,8 @@ private[fs2] object Algebra {
       implicit ec: ExecutionContext): FreeC[Algebra[F, O, ?], Unit] =
     scope0(s, Some(ec))
 
-  private[fs2] def closeScope[F[_], O](toClose: CompileScope[F, O]): FreeC[Algebra[F, O, ?], Unit] =
-    FreeC.Eval[Algebra[F, O, ?], Unit](CloseScope(toClose))
+  private[fs2] def closeScope[F[_], O](scopeId: Token): FreeC[Algebra[F, O, ?], Unit] =
+    FreeC.Eval[Algebra[F, O, ?], Unit](CloseScope(scopeId))
 
   private def scope0[F[_], O](
       s: FreeC[Algebra[F, O, ?], Unit],
@@ -186,14 +186,15 @@ private[fs2] object Algebra {
               }
 
             case c: Algebra.CloseScope[F, X] =>
-              F.flatMap(c.toClose.close) { r =>
-                F.flatMap(c.toClose.openAncestor) { scopeAfterClose =>
-                  uncons(scopeAfterClose.asInstanceOf[CompileScope[F, O]],
-                         f(r),
-                         unconsF,
-                         chunkSize,
-                         maxSteps)
-                }
+              F.flatMap(scope.findScope(c.scopeId)) {
+                case Some(toClose) =>
+                  F.flatMap(toClose.close) { r =>
+                    F.flatMap(toClose.openAncestor) { scopeAfterClose =>
+                      uncons(scopeAfterClose, f(r), unconsF, chunkSize, maxSteps)
+                    }
+                  }
+                case None =>
+                  F.raiseError(new IllegalStateException("Closing scope that does not exists"))
               }
 
             case o: Algebra.OpenScope[F, X] =>
@@ -208,7 +209,7 @@ private[fs2] object Algebra {
               F.flatMap(scope.open(interruptible)) { innerScope =>
                 val next: FreeC[Algebra[F, X, ?], Unit] = o.s.transformWith { r =>
                   Algebra
-                    .closeScope[F, X](innerScope.asInstanceOf[CompileScope[F, X]]) // safe to cast no values are emitted
+                    .closeScope[F, X](innerScope.id)
                     .transformWith { cr =>
                       f(CompositeFailure.fromResults(r, cr))
                     }
@@ -306,10 +307,15 @@ private[fs2] object Algebra {
             }
 
           case c: Algebra.CloseScope[F, O] =>
-            F.flatMap(c.toClose.close) { r =>
-              F.flatMap(c.toClose.openAncestor) { scopeAfterClose =>
-                compileFoldLoop(scopeAfterClose, acc, g, f(r))
-              }
+            F.flatMap(scope.findScope(c.scopeId)) {
+              case Some(toClose) =>
+                F.flatMap(toClose.close) { r =>
+                  F.flatMap(toClose.openAncestor) { scopeAfterClose =>
+                    compileFoldLoop(scopeAfterClose, acc, g, f(r))
+                  }
+                }
+              case None =>
+                F.raiseError(new IllegalStateException("Closing scope that does not exists"))
             }
 
           case o: Algebra.OpenScope[F, O] =>
@@ -323,7 +329,7 @@ private[fs2] object Algebra {
 
             F.flatMap(scope.open(interruptible)) { innerScope =>
               val next = o.s.transformWith { r =>
-                Algebra.closeScope(innerScope).transformWith { cr =>
+                Algebra.closeScope(innerScope.id).transformWith { cr =>
                   f(CompositeFailure.fromResults(r, cr))
                 }
               }
@@ -340,56 +346,64 @@ private[fs2] object Algebra {
     }
   }
 
-  def translate[F[_], G[_], O, R](fr: FreeC[Algebra[F, O, ?], R],
-                                  u: F ~> G): FreeC[Algebra[G, O, ?], R] = {
-    def algFtoG[O2]: Algebra[F, O2, ?] ~> Algebra[G, O2, ?] =
-      new (Algebra[F, O2, ?] ~> Algebra[G, O2, ?]) { self =>
-        def apply[X](in: Algebra[F, O2, X]): Algebra[G, O2, X] = in match {
-          case o: Output[F, O2] => Output[G, O2](o.values)
-          case Run(values)      => Run[G, O2, X](values)
-          case Eval(value)      => Eval[G, O2, X](u(value))
-          case un: Uncons[F, x, O2] =>
-            Uncons[G, x, O2](translate(un.s, u), un.chunkSize, un.maxSteps)
-              .asInstanceOf[Algebra[G, O2, X]]
-          case a: Acquire[F, O2, _] =>
-            Acquire(u(a.resource), r => u(a.release(r)))
-          case r: Release[F, O2]     => Release[G, O2](r.token)
-          case os: OpenScope[F, O2]  => os.asInstanceOf[Algebra[G, O2, X]]
-          case cs: CloseScope[F, O2] => cs.asInstanceOf[CloseScope[G, O2]]
-          case gs: GetScope[F, O2]   => gs.asInstanceOf[Algebra[G, O2, X]]
-        }
-      }
-    fr.translate[Algebra[G, O, ?]](algFtoG)
-  }
 
-//  def translate2[F[_], G[_], O, R](fr: FreeC[Algebra[F, O, ?], R],
-//                                   u: F ~> G): FreeC[Algebra[G, O, ?], R] =
-//    fr.viewL.get match {
-//      case done: FreeC.Pure[Algebra[F, O, ?], R]   => FreeC.Pure(done.r)
-//      case failed: FreeC.Fail[Algebra[F, O, ?], R] => FreeC.Fail(failed.error)
-//      case bound: FreeC.Bind[Algebra[F, O, ?], y, R] =>
-//        val f = bound.f
-//          .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, O, ?], R]]
-//        val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], y]].fr
-//        fx match {
-//          case output: Algebra.Output[F, O] =>
-//            segment(output.values).transformWith { r =>
-//              translate2(f(r), u)
-//            }
-//          case run: Algebra.Run[F, O, r]         => ???
-//          case u: Algebra.Uncons[F, x, O]        => ???
-//          case eval: Algebra.Eval[F, O, _]       => ???
-//          case acquire: Algebra.Acquire[F, O, _] => ???
-//          case release: Algebra.Release[F, O]    => ???
-//          case c: Algebra.CloseScope[F, O]       => ???
-//          case o: Algebra.OpenScope[F, O]        =>
-//            Algebra.scope0(translate2(o.s, u), o.interruptible.map {case (effF, ec) => ??? })
-//
-//          case e: GetScope[F, O]                 => ???
-//        }
-//
-//      case e =>
-//        sys.error("FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), was: " + e)
-//    }
+  def translate[F[_], G[_], O, R](fr: FreeC[Algebra[F, O, ?], R],
+                                  fK: F ~> G): FreeC[Algebra[G, O, ?], R] =
+    fr.viewL.get match {
+      case done: FreeC.Pure[Algebra[F, O, ?], R]   => FreeC.Pure(done.r)
+      case failed: FreeC.Fail[Algebra[F, O, ?], R] => FreeC.Fail(failed.error)
+      case bound: FreeC.Bind[Algebra[F, O, ?], y, R] =>
+        val f = bound.f
+          .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, O, ?], R]]
+        val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], y]].fr
+        fx match {
+          case output: Algebra.Output[F, O] =>
+            Algebra.output(output.values).transformWith { r =>
+              translate(f(r), fK)
+            }
+          case run: Algebra.Run[F, O, r] =>
+            Algebra.segment(run.values).transformWith { r =>
+              translate(f(r), fK)
+            }
+
+          case u: Algebra.Uncons[F, x, O] =>
+            Algebra.uncons(translate(u.s, fK)).transformWith { r =>
+              translate(f(r), fK)
+            }
+
+          case eval: Algebra.Eval[F, O, _] =>
+            Algebra.eval(fK(eval.value)).transformWith { r =>
+              translate(f(r), fK)
+            }
+
+          case acquire: Algebra.Acquire[F, O, r] =>
+            Algebra
+              .acquire[G, O, r](fK(acquire.resource), r => fK(acquire.release(r)))
+              .transformWith { r =>
+                translate(f(r), fK)
+              }
+
+          case release: Algebra.Release[F, O] =>
+            Algebra.release(release.token).transformWith { r =>
+              translate(f(r), fK)
+            }
+          case c: Algebra.CloseScope[F, O] =>
+            Algebra.closeScope(c.scopeId).transformWith { r =>
+              translate(f(r), fK)
+            }
+          case o: Algebra.OpenScope[F, O] =>
+            Algebra.scope0(translate(o.s, fK), o.interruptible).transformWith { r =>
+              translate(f(r), fK)
+            }
+
+          case e: GetScope[F, O] =>
+            Algebra.getScope.transformWith { r =>
+              translate(f(r), fK)
+            }
+        }
+
+      case e =>
+        sys.error("FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), was: " + e)
+    }
 
 }

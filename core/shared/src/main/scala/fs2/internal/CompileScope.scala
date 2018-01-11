@@ -267,6 +267,11 @@ private[fs2] final class CompileScope[F[_], O] private (
     F.pure(go(self))
   }
 
+  /** finds scope with given `id` starting by this scope, continuing with ancestors **/
+  def findScope(scopeId: Token): F[Option[CompileScope[F, O]]] =
+    if (self.id == scopeId) F.pure(Some(self))
+    else findAncestor(scopeId)
+
   // See docs on [[Scope#lease]]
   def lease: F[Option[Scope.Lease[F]]] = {
     val T = Catenable.instance

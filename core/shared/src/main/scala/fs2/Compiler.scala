@@ -53,6 +53,7 @@ trait CompilerLowPriorityImplicits {
   implicit def syncCompiler[F[_]](implicit F: Sync[F]): Compiler[F] = new Compiler[F] {
     def fold[O, B](s: Stream[F, O], init: B)(f: (B, O) => B) =
       Algebra.compile(s.get[F, O], None, init)(f)
+
     def toList[O](s: Stream[F, O]) =
       F.suspend(F.map(fold(s, new collection.mutable.ListBuffer[O])(_ += _))(_.result))
 
@@ -68,6 +69,7 @@ object Compiler extends CompilerLowPriorityImplicits {
   implicit def effectCompiler[F[_]](implicit F: Effect[F]): Compiler[F] = new Compiler[F] {
     def fold[O, B](s: Stream[F, O], init: B)(f: (B, O) => B) =
       Algebra.compile(s.get[F, O], Some(F), init)(f)
+
     def toList[O](s: Stream[F, O]) =
       F.suspend(F.map(fold(s, new collection.mutable.ListBuffer[O])(_ += _))(_.result))
 
