@@ -133,13 +133,13 @@ This markdown file contains code examples which can be compiled using tut. Switc
 <span class="c1">// eff: fs2.Stream[cats.effect.IO,Int] = Stream(..)
 </span>
 <span class="k">val</span> <span class="n">ra</span> <span class="k">=</span> <span class="n">eff</span><span class="o">.</span><span class="n">compile</span><span class="o">.</span><span class="n">toVector</span> <span class="c1">// gather all output into a Vector
-// ra: cats.effect.IO[Vector[Int]] = IO$1854621061
+// ra: cats.effect.IO[Vector[Int]] = IO$67917213
 </span>
 <span class="k">val</span> <span class="n">rb</span> <span class="k">=</span> <span class="n">eff</span><span class="o">.</span><span class="n">compile</span><span class="o">.</span><span class="n">drain</span> <span class="c1">// purely for effects
-// rb: cats.effect.IO[Unit] = IO$519496160
+// rb: cats.effect.IO[Unit] = IO$1384673196
 </span>
 <span class="k">val</span> <span class="n">rc</span> <span class="k">=</span> <span class="n">eff</span><span class="o">.</span><span class="n">compile</span><span class="o">.</span><span class="n">fold</span><span class="o">(</span><span class="mi">0</span><span class="o">)(</span><span class="k">_</span> <span class="o">+</span> <span class="k">_</span><span class="o">)</span> <span class="c1">// run and accumulate some result
-// rc: cats.effect.IO[Int] = IO$1304679528
+// rc: cats.effect.IO[Int] = IO$141903217
 </span></code></pre></div></div>
 
 <p>Notice these all return a <code class="highlighter-rouge">IO</code> of some sort, but this process of compilation doesn’t actually <em>perform</em> any of the effects (nothing gets printed).</p>
@@ -260,10 +260,10 @@ This markdown file contains code examples which can be compiled using tut. Switc
 <span class="n">count</span><span class="k">:</span> <span class="kt">java.util.concurrent.atomic.AtomicLong</span> <span class="o">=</span> <span class="mi">0</span>
 
 <span class="n">scala</span><span class="o">&gt;</span> <span class="k">val</span> <span class="n">acquire</span> <span class="k">=</span> <span class="nc">IO</span> <span class="o">{</span> <span class="n">println</span><span class="o">(</span><span class="s">"incremented: "</span> <span class="o">+</span> <span class="n">count</span><span class="o">.</span><span class="n">incrementAndGet</span><span class="o">);</span> <span class="o">()</span> <span class="o">}</span>
-<span class="n">acquire</span><span class="k">:</span> <span class="kt">cats.effect.IO</span><span class="o">[</span><span class="kt">Unit</span><span class="o">]</span> <span class="k">=</span> <span class="nc">IO$413975443</span>
+<span class="n">acquire</span><span class="k">:</span> <span class="kt">cats.effect.IO</span><span class="o">[</span><span class="kt">Unit</span><span class="o">]</span> <span class="k">=</span> <span class="nc">IO$1707609441</span>
 
 <span class="n">scala</span><span class="o">&gt;</span> <span class="k">val</span> <span class="n">release</span> <span class="k">=</span> <span class="nc">IO</span> <span class="o">{</span> <span class="n">println</span><span class="o">(</span><span class="s">"decremented: "</span> <span class="o">+</span> <span class="n">count</span><span class="o">.</span><span class="n">decrementAndGet</span><span class="o">);</span> <span class="o">()</span> <span class="o">}</span>
-<span class="n">release</span><span class="k">:</span> <span class="kt">cats.effect.IO</span><span class="o">[</span><span class="kt">Unit</span><span class="o">]</span> <span class="k">=</span> <span class="nc">IO$1808123881</span>
+<span class="n">release</span><span class="k">:</span> <span class="kt">cats.effect.IO</span><span class="o">[</span><span class="kt">Unit</span><span class="o">]</span> <span class="k">=</span> <span class="nc">IO$1738675015</span>
 </code></pre></div></div>
 
 <div class="language-scala highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">scala</span><span class="o">&gt;</span> <span class="nc">Stream</span><span class="o">.</span><span class="n">bracket</span><span class="o">(</span><span class="n">acquire</span><span class="o">)(</span><span class="k">_</span> <span class="k">=&gt;</span> <span class="nc">Stream</span><span class="o">(</span><span class="mi">1</span><span class="o">,</span><span class="mi">2</span><span class="o">,</span><span class="mi">3</span><span class="o">)</span> <span class="o">++</span> <span class="n">err</span><span class="o">,</span> <span class="k">_</span> <span class="k">=&gt;</span> <span class="n">release</span><span class="o">).</span><span class="n">compile</span><span class="o">.</span><span class="n">drain</span><span class="o">.</span><span class="n">unsafeRunSync</span><span class="o">()</span>
@@ -510,7 +510,7 @@ def mergeHaltBoth[F[_]:Effect,O](implicit ec: ExecutionContext): Pipe2[F,O,O,O] 
 <span class="c1">// import cats.effect.Sync
 </span>
 <span class="k">val</span> <span class="n">T</span> <span class="k">=</span> <span class="nc">Sync</span><span class="o">[</span><span class="kt">IO</span><span class="o">]</span>
-<span class="c1">// T: cats.effect.Sync[cats.effect.IO] = cats.effect.IOInstances$$anon$1@6e4dda6d
+<span class="c1">// T: cats.effect.Sync[cats.effect.IO] = cats.effect.IOInstances$$anon$1@2f72425f
 </span>
 <span class="k">val</span> <span class="n">s</span> <span class="k">=</span> <span class="nc">Stream</span><span class="o">.</span><span class="n">eval_</span><span class="o">(</span><span class="n">T</span><span class="o">.</span><span class="n">delay</span> <span class="o">{</span> <span class="n">destroyUniverse</span><span class="o">()</span> <span class="o">})</span> <span class="o">++</span> <span class="nc">Stream</span><span class="o">(</span><span class="s">"...moving on"</span><span class="o">)</span>
 <span class="c1">// s: fs2.Stream[cats.effect.IO,String] = Stream(..)
@@ -564,12 +564,12 @@ def mergeHaltBoth[F[_]:Effect,O](implicit ec: ExecutionContext): Pipe2[F,O,O,O] 
 </span>
 <span class="c1">// Effect extends both Sync and Async
 </span><span class="k">val</span> <span class="n">T</span> <span class="k">=</span> <span class="n">cats</span><span class="o">.</span><span class="n">effect</span><span class="o">.</span><span class="nc">Effect</span><span class="o">[</span><span class="kt">IO</span><span class="o">]</span>
-<span class="c1">// T: cats.effect.Effect[cats.effect.IO] = cats.effect.IOInstances$$anon$1@6e4dda6d
+<span class="c1">// T: cats.effect.Effect[cats.effect.IO] = cats.effect.IOInstances$$anon$1@2f72425f
 </span>
 <span class="k">val</span> <span class="n">bytes</span> <span class="k">=</span> <span class="n">T</span><span class="o">.</span><span class="n">async</span><span class="o">[</span><span class="kt">Array</span><span class="o">[</span><span class="kt">Byte</span><span class="o">]]</span> <span class="o">{</span> <span class="o">(</span><span class="n">cb</span><span class="k">:</span> <span class="kt">Either</span><span class="o">[</span><span class="kt">Throwable</span>,<span class="kt">Array</span><span class="o">[</span><span class="kt">Byte</span><span class="o">]]</span> <span class="k">=&gt;</span> <span class="nc">Unit</span><span class="o">)</span> <span class="k">=&gt;</span>
   <span class="n">c</span><span class="o">.</span><span class="n">readBytesE</span><span class="o">(</span><span class="n">cb</span><span class="o">)</span>
 <span class="o">}</span>
-<span class="c1">// bytes: cats.effect.IO[Array[Byte]] = IO$836864599
+<span class="c1">// bytes: cats.effect.IO[Array[Byte]] = IO$393704719
 </span>
 <span class="nc">Stream</span><span class="o">.</span><span class="n">eval</span><span class="o">(</span><span class="n">bytes</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="k">_</span><span class="o">.</span><span class="n">toList</span><span class="o">).</span><span class="n">compile</span><span class="o">.</span><span class="n">toVector</span><span class="o">.</span><span class="n">unsafeRunSync</span><span class="o">()</span>
 <span class="c1">// res42: Vector[List[Byte]] = Vector(List(0, 1, 2))
@@ -610,7 +610,7 @@ package which has nice FS2 bindings to Java NIO libraries, using exactly this ap
 <span class="k">def</span> <span class="n">rows</span><span class="o">[</span><span class="kt">F</span><span class="o">[</span><span class="k">_</span><span class="o">]](</span><span class="n">h</span><span class="k">:</span> <span class="kt">CSVHandle</span><span class="o">)(</span><span class="k">implicit</span> <span class="n">F</span><span class="k">:</span> <span class="kt">Effect</span><span class="o">[</span><span class="kt">F</span><span class="o">],</span> <span class="n">ec</span><span class="k">:</span> <span class="kt">ExecutionContext</span><span class="o">)</span><span class="k">:</span> <span class="kt">Stream</span><span class="o">[</span><span class="kt">F</span>,<span class="kt">Row</span><span class="o">]</span> <span class="k">=</span>
   <span class="k">for</span> <span class="o">{</span>
     <span class="n">q</span> <span class="k">&lt;-</span> <span class="nc">Stream</span><span class="o">.</span><span class="n">eval</span><span class="o">(</span><span class="n">async</span><span class="o">.</span><span class="n">unboundedQueue</span><span class="o">[</span><span class="kt">F</span>,<span class="kt">Either</span><span class="o">[</span><span class="kt">Throwable</span>,<span class="kt">Row</span><span class="o">]])</span>
-    <span class="k">_</span> <span class="k">&lt;-</span> <span class="nc">Stream</span><span class="o">.</span><span class="n">suspend</span> <span class="o">{</span> <span class="n">h</span><span class="o">.</span><span class="n">withRows</span> <span class="o">{</span> <span class="n">e</span> <span class="k">=&gt;</span> <span class="n">async</span><span class="o">.</span><span class="n">unsafeRunAsync</span><span class="o">(</span><span class="n">q</span><span class="o">.</span><span class="n">enqueue1</span><span class="o">(</span><span class="n">e</span><span class="o">))(</span><span class="k">_</span> <span class="k">=&gt;</span> <span class="nc">IO</span><span class="o">.</span><span class="n">unit</span><span class="o">)</span> <span class="o">};</span> <span class="nc">Stream</span><span class="o">.</span><span class="n">emit</span><span class="o">(())</span> <span class="o">}</span>
+    <span class="k">_</span> <span class="k">&lt;-</span>  <span class="nc">Stream</span><span class="o">.</span><span class="n">eval</span> <span class="o">{</span> <span class="n">F</span><span class="o">.</span><span class="n">delay</span><span class="o">(</span><span class="n">h</span><span class="o">.</span><span class="n">withRows</span><span class="o">(</span><span class="n">e</span> <span class="k">=&gt;</span> <span class="n">async</span><span class="o">.</span><span class="n">unsafeRunAsync</span><span class="o">(</span><span class="n">q</span><span class="o">.</span><span class="n">enqueue1</span><span class="o">(</span><span class="n">e</span><span class="o">))(</span><span class="k">_</span> <span class="k">=&gt;</span> <span class="nc">IO</span><span class="o">.</span><span class="n">unit</span><span class="o">)))</span> <span class="o">}</span>
     <span class="n">row</span> <span class="k">&lt;-</span> <span class="n">q</span><span class="o">.</span><span class="n">dequeue</span><span class="o">.</span><span class="n">rethrow</span>
   <span class="o">}</span> <span class="k">yield</span> <span class="n">row</span>
 <span class="c1">// rows: [F[_]](h: CSVHandle)(implicit F: cats.effect.Effect[F], implicit ec: scala.concurrent.ExecutionContext)fs2.Stream[F,Row]
