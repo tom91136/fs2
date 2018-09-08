@@ -1330,39 +1330,59 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Algebra[Nothing, 
   def switchMap[F2[x] >: F[x], O2](f: O => Stream[F2, O2])(
       implicit F2: Concurrent[F2]): Stream[F2, O2] =
     Stream.eval(Queue.unbounded[F2, Option[Chunk[O2]]]).flatMap { downstream =>
-      Stream.eval(Queue.unbounded[F2, Option[(O, Deferred[F2, Unit])]]).flatMap { next =>
-        Stream.eval(Ref.of[F2, Option[Deferred[F2, Unit]]](None)).flatMap { haltRef =>
-          // consumes the upstream by sending a packet(stream and a ref) to the next queue and
-          // also does error handling/inturruption/switching by terminating the currently running
-          // inner stream
-          def runUpstream =
-            this
-              .onFinalize(next.enqueue1(None))
-              .evalMap { x =>
-                Deferred[F2, Unit].flatMap(halt =>
-                  haltRef.modify {
-                    case None       => halt.some -> F2.unit
-                    case Some(last) => halt.some -> last.complete(())
-                  }.flatten *> next.enqueue1((x -> halt).some))
-              }
+      Stream.eval(Queue.unbounded[F2, Option[(O, Deferred[F2, Unit], Scope.Lease[F2])]]).flatMap {
+        next =>
+          Stream.eval(Ref.of[F2, Option[Deferred[F2, Unit]]](None)).flatMap { haltRef =>
+            def show(str: String) = F2.delay { println(str) }
 
-          // consumes the packets produced by runUpstream and drains the content to downstream
-          // upon error/interruption, the downstream will also be signalled for termination
-          def runInner =
-            next.dequeue.unNoneTerminate
-              .onFinalize(downstream.enqueue1(None))
-              .flatMap {
-                case (o, haltInner) =>
-                  f(o).chunks
-                    .evalMap(x => downstream.enqueue1(x.some))
-                    .interruptWhen(haltInner.get.attempt)
-              }
+            // consumes the upstream by sending a packet(stream and a ref) to the next queue and
+            // also does error handling/interruption/switching by terminating the currently running
+            // inner stream
+            def runUpstream =
+              this
+                .onFinalize(show("Upper fin") *> next.enqueue1(None))
+                .flatMap { x =>
+                  Stream
+                      .getScope[F2]
+                      .evalMap(_.lease.flatMap {
+                        case None        => F2.raiseError[Unit](new Throwable("No lease!"))
+                        case Some(lease) =>
+                          Deferred[F2, Unit].flatMap(halt =>
+                            haltRef.modify {
+                              case None       => halt.some -> F2.unit
+                              case Some(last) => halt.some -> last.complete(())
+                            }.flatten *> next.enqueue1((x, halt, lease).some))
+                      })
+                }
 
-          // continuously dequeue the downstream while we process the upstream
-          downstream.dequeue.unNoneTerminate
-            .flatMap(Stream.chunk(_))
-            .concurrently(runInner.concurrently(runUpstream))
-        }
+            // consumes the packets produced by runUpstream and drains the content to downstream
+            // upon error/interruption, the downstream will also be signalled for termination
+            def runInner =
+              next.dequeue.unNoneTerminate
+                .onFinalize(show(s"Inner fin") *> downstream.enqueue1(None))
+                .flatMap {
+                  case (o, haltInner, lease) =>
+//                          Stream.eval_(show(s"Got lease for (`$o`)") ) ++
+                    f(o).chunks
+                      .evalMap(x => downstream.enqueue1(x.some))
+                      .interruptWhen(haltInner.get.attempt)
+                      .adaptError { case e => println(e); e }
+                      .onFinalize(
+                        show(s"Inner fin (`$o`)") <* lease.cancel
+//                                .flatMap{
+//                              case Left(e) =>show(s"Fin $o failed: $e")
+//                              case Right(x)=> show(s"Fin $o ok")
+//                            }
+                      )
+
+                }
+
+            // continuously dequeue the downstream while we process the upstream
+            downstream.dequeue.unNoneTerminate
+              .flatMap(Stream.chunk(_))
+              .concurrently(runInner.concurrently(runUpstream))
+              .onFinalize(show("All fin"))
+          }
       }
     }
 
