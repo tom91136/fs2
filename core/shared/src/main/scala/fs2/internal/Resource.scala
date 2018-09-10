@@ -140,14 +140,13 @@ private[internal] object Resource {
                   val now = s.copy(leases = s.leases - 1)
                   now -> now
                 }) { now =>
-                    import cats.implicits._
                   if (now.open)
-                      F.delay(println("==scope is open, we don't have to invoke finalizer"))  *> F.pure(Right(())) // scope is open, we don't have to invoke finalizer
+                    F.pure(Right(())) // scope is open, we don't have to invoke finalizer
                   else if (now.leases != 0)
-                    F.delay(println("==scope is closed, but leases still pending"))  *> F.pure(Right(())) // scope is closed, but leases still pending
+                    F.pure(Right(())) // scope is closed, but leases still pending
                   else {
                     // scope is closed and this is last lease, assure finalizer is removed from the state and run
-                      F.delay(println("== last lease, fire fin"))  *>F.flatten(state.modify { s =>
+                    F.flatten(state.modify { s =>
                       // previous finalizer shall be alwayy present at this point, this shall invoke it
                       s.copy(finalizer = None) -> s.finalizer.getOrElse(F.pure(Right(())))
                     })
