@@ -83,7 +83,7 @@ class SwitchMapSpec extends Fs2Spec with EventuallySupport {
           val prog = Stream.eval(Ref[IO].of(false)).flatMap { verdict =>
             Stream.eval(Ref[IO].of(false)).flatMap { innerReleased =>
               (Stream.sleep_[IO](25.millis) ++ s.get)
-                .onFinalize(innerReleased.get.flatMap(inner => verdict.set(inner)))
+                .onFinalize(IO{println("--Outer !!")} *> innerReleased.get.flatMap(inner => verdict.set(inner)))
                 .switchMap(_ => f.get.onFinalize(innerReleased.set(true)))
                 .attempt
                 .drain ++
